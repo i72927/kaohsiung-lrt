@@ -266,6 +266,7 @@
         <div id="door-status">車門已鎖定・行駛中</div>
         <button type="button" class="touch-btn" id="btn-depart">行駛中</button>
         <div id="center-tools">
+          <button type="button" class="touch-btn mini-btn" id="btn-bgm">🎵 音樂開</button>
           <button type="button" class="touch-btn mini-btn" id="btn-mute">🔊 音效開</button>
           <button type="button" class="touch-btn mini-btn" id="btn-restart">↻ 重來</button>
         </div>
@@ -503,6 +504,10 @@
   const AudioEngine = {
     ctx: null,
     muted: false,
+    bgmEnabled: true,
+    bgmGain: null,
+    bgmTimer: null,
+    bgmStep: 0,
     motorOsc: null,
     motorGain: null,
     railGain: null,
@@ -564,6 +569,140 @@
       hFilt.connect(this.hornGain).connect(this.ctx.destination);
       this.hornOscA.start();
       this.hornOscB.start();
+
+      // Master BGM bus for cheerful Guitar + Piano train music
+      this.bgmGain = this.ctx.createGain();
+      this.bgmGain.gain.value = 0.24;
+      this.bgmGain.connect(this.ctx.destination);
+      this.startBGM();
+    },
+    startBGM() {
+      if (this.bgmTimer) return;
+      // 118 BPM 16th-note groove (~127ms per step), upbeat Japanese train-sim City-Pop progression in C Major:
+      // Fmaj7 -> G7 -> Em7 -> Am7 -> Dm7 -> G7 -> Cmaj7 -> C7 (8 bars = 64 eighth-note steps)
+      const midiToHz = (m) => 440 * Math.pow(2, (m - 69) / 12);
+      const chords = [
+        { bass: 41, gtr: [53, 57, 60, 64], pno: [65, 69, 72, 76] }, // Fmaj7
+        { bass: 43, gtr: [55, 59, 62, 65], pno: [67, 71, 74, 77] }, // G7
+        { bass: 40, gtr: [52, 55, 59, 62], pno: [64, 67, 71, 74] }, // Em7
+        { bass: 45, gtr: [57, 60, 64, 67], pno: [69, 72, 76, 79] }, // Am7
+        { bass: 38, gtr: [50, 53, 57, 60], pno: [62, 65, 69, 72] }, // Dm7
+        { bass: 43, gtr: [55, 59, 62, 65], pno: [67, 71, 74, 77] }, // G7
+        { bass: 48, gtr: [55, 60, 64, 67], pno: [64, 67, 71, 72] }, // Cmaj7
+        { bass: 48, gtr: [55, 58, 60, 64], pno: [64, 67, 70, 72] }, // C7 turnaround
+      ];
+      // Breezy, cheerful piano melody (64 eighth-note steps, 0 = rest)
+      const melody = [
+        76, 0, 79, 76, 72, 0, 74, 76,
+        74, 0, 71, 67, 0, 71, 74, 0,
+        72, 0, 76, 74, 71, 0, 72, 74,
+        72, 0, 69, 0, 72, 74, 76, 0,
+        77, 0, 76, 74, 72, 0, 69, 72,
+        74, 0, 79, 77, 74, 0, 71, 74,
+        76, 0, 72, 0, 79, 0, 76, 74,
+        72, 0, 0, 74, 76, 0, 79, 0
+      ];
+      const tick = () => {
+        if (!this.ctx || !this.bgmGain) return;
+        const active = this.bgmEnabled && !this.muted;
+        const targetVol = active ? 0.24 : 0.0;
+        this.bgmGain.gain.setTargetAtTime(targetVol, this.ctx.currentTime, 0.06);
+        if (!active) return;
+
+        const now = this.ctx.currentTime + 0.02;
+        const step = this.bgmStep % 64;
+        const bar = Math.floor(step / 8);
+        const beat = step % 8; // 8 eighth-notes per bar
+        const ch = chords[bar];
+
+        // 1. Acoustic / Clean Electric Guitar: bouncy syncopated strum & arpeggio
+        if (beat === 0 || beat === 3 || beat === 6) {
+          ch.gtr.forEach((note, idx) => {
+            this.playGuitarPluck(midiToHz(note), now + idx * 0.018, 0.42, beat === 0 ? 0.14 : 0.10);
+          });
+        } else if (beat === 2 || beat === 5) {
+          this.playGuitarPluck(midiToHz(ch.gtr[beat % ch.gtr.length]), now, 0.28, 0.09);
+        }
+
+        // 2. Warm Upright/Electric Bass on beats 1, 4, 5
+        if (beat === 0 || beat === 3 || beat === 4) {
+          this.playBassNote(midiToHz(ch.bass), now, 0.34, 0.16);
+        }
+
+        // 3. Sparkling Piano: light comping + cheerful train melody
+        if (beat === 0 || beat === 4) {
+          this.playPianoNote(midiToHz(ch.pno[0]), now, 0.48, 0.075);
+          this.playPianoNote(midiToHz(ch.pno[2]), now, 0.48, 0.065);
+        }
+        const mel = melody[step];
+        if (mel > 0) {
+          this.playPianoNote(midiToHz(mel), now, 0.44, 0.15);
+        }
+
+        this.bgmStep = (this.bgmStep + 1) % 64;
+      };
+      this.bgmTimer = setInterval(tick, 254); // ~118 BPM eighth-notes
+    },
+    playGuitarPluck(freq, startTime, dur, vol) {
+      const o1 = this.ctx.createOscillator();
+      const o2 = this.ctx.createOscillator();
+      const filt = this.ctx.createBiquadFilter();
+      const g = this.ctx.createGain();
+      o1.type = "triangle";
+      o2.type = "sawtooth";
+      o1.frequency.setValueAtTime(freq, startTime);
+      o2.frequency.setValueAtTime(freq * 2, startTime);
+      filt.type = "lowpass";
+      filt.frequency.setValueAtTime(2400, startTime);
+      filt.frequency.exponentialRampToValueAtTime(620, startTime + dur);
+      g.gain.setValueAtTime(0.001, startTime);
+      g.gain.linearRampToValueAtTime(vol, startTime + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0008, startTime + dur);
+      o1.connect(filt);
+      const g2 = this.ctx.createGain();
+      g2.gain.value = 0.25;
+      o2.connect(g2).connect(filt);
+      filt.connect(g).connect(this.bgmGain);
+      o1.start(startTime); o2.start(startTime);
+      o1.stop(startTime + dur + 0.03); o2.stop(startTime + dur + 0.03);
+    },
+    playPianoNote(freq, startTime, dur, vol) {
+      const o1 = this.ctx.createOscillator();
+      const o2 = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      o1.type = "sine";
+      o2.type = "triangle";
+      o1.frequency.setValueAtTime(freq, startTime);
+      o2.frequency.setValueAtTime(freq * 2, startTime);
+      const g2 = this.ctx.createGain();
+      g2.gain.setValueAtTime(0.28, startTime);
+      g2.gain.exponentialRampToValueAtTime(0.02, startTime + dur * 0.6);
+      g.gain.setValueAtTime(0.001, startTime);
+      g.gain.linearRampToValueAtTime(vol, startTime + 0.006);
+      g.gain.exponentialRampToValueAtTime(0.0008, startTime + dur);
+      o1.connect(g);
+      o2.connect(g2).connect(g);
+      g.connect(this.bgmGain);
+      o1.start(startTime); o2.start(startTime);
+      o1.stop(startTime + dur + 0.03); o2.stop(startTime + dur + 0.03);
+    },
+    playBassNote(freq, startTime, dur, vol) {
+      const o = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      o.type = "sine";
+      o.frequency.setValueAtTime(freq, startTime);
+      g.gain.setValueAtTime(0.001, startTime);
+      g.gain.linearRampToValueAtTime(vol, startTime + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.001, startTime + dur);
+      o.connect(g).connect(this.bgmGain);
+      o.start(startTime);
+      o.stop(startTime + dur + 0.03);
+    },
+    duckBGM(sec = 3.8) {
+      if (!this.ctx || !this.bgmGain || !this.bgmEnabled || this.muted) return;
+      const now = this.ctx.currentTime;
+      this.bgmGain.gain.setTargetAtTime(0.06, now, 0.12);
+      this.bgmGain.gain.setTargetAtTime(0.24, now + sec, 0.35);
     },
     update(kmh, notch, sMeters) {
       if (!this.ctx || this.muted) {
@@ -626,6 +765,7 @@
     doorBeep() { this.tone(880, 0.14, 0.12, 0); this.tone(880, 0.14, 0.12, 0.22); },
     departReady() { this.tone(987.77, 0.18, 0.15, 0); this.tone(1318.51, 0.30, 0.16, 0.18); },
     speakMandarin(nameZh) {
+      this.duckBGM(4.2);
       this.arrivalChime();
       if (this.muted || !("speechSynthesis" in window)) return;
       try {
@@ -1209,6 +1349,12 @@
   hornBtn.addEventListener("pointerup", releaseHorn);
   hornBtn.addEventListener("pointercancel", releaseHorn);
 
+  const bgmBtn = document.getElementById("btn-bgm");
+  bgmBtn.addEventListener("pointerdown", () => {
+    AudioEngine.init();
+    AudioEngine.bgmEnabled = !AudioEngine.bgmEnabled;
+    bgmBtn.textContent = AudioEngine.bgmEnabled ? "🎵 音樂開" : "🎵 音樂關";
+  });
   muteBtn.addEventListener("pointerdown", () => {
     AudioEngine.init();
     AudioEngine.muted = !AudioEngine.muted;
