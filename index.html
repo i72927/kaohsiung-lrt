@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0a0f12">
+<link rel="manifest" href='data:application/manifest+json,{"name":"高雄輕軌 Mode 7 電車GO","short_name":"高雄輕軌GO","display":"fullscreen","orientation":"landscape","background_color":"#0a0f12","theme_color":"#0a0f12"}'>
 <title>高雄輕軌 Mode 7 電車GO（手機觸控版）</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
@@ -266,8 +269,9 @@
         <div id="door-status">車門已鎖定・行駛中</div>
         <button type="button" class="touch-btn" id="btn-depart">行駛中</button>
         <div id="center-tools">
-          <button type="button" class="touch-btn mini-btn" id="btn-bgm">🎵 音樂開</button>
-          <button type="button" class="touch-btn mini-btn" id="btn-mute">🔊 音效開</button>
+          <button type="button" class="touch-btn mini-btn" id="btn-fs">⛶ 全螢幕</button>
+          <button type="button" class="touch-btn mini-btn" id="btn-bgm">🎵 音樂</button>
+          <button type="button" class="touch-btn mini-btn" id="btn-mute">🔊 音效</button>
           <button type="button" class="touch-btn mini-btn" id="btn-restart">↻ 重來</button>
         </div>
       </div>
@@ -515,14 +519,30 @@
     hornOscB: null,
     hornGain: null,
     lastJoint: 0,
+    unlock() {
+      this.init();
+      if (!this.ctx) return;
+      if (this.ctx.state === "suspended") {
+        this.ctx.resume().catch(() => {});
+      }
+      // iOS Safari & Android Chrome require a synchronous silent buffer playback inside a user tap
+      try {
+        const b = this.ctx.createBuffer(1, 1, 22050);
+        const src = this.ctx.createBufferSource();
+        src.buffer = b;
+        src.connect(this.ctx.destination);
+        src.start(0);
+      } catch (_) {}
+    },
     init() {
       if (this.ctx) {
-        if (this.ctx.state === "suspended") this.ctx.resume();
+        if (this.ctx.state === "suspended") this.ctx.resume().catch(() => {});
         return;
       }
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return;
       this.ctx = new AC();
+      if (this.ctx.state === "suspended") this.ctx.resume().catch(() => {});
 
       // VVVF motor oscillator
       this.motorOsc = this.ctx.createOscillator();
@@ -570,10 +590,13 @@
       this.hornOscA.start();
       this.hornOscB.start();
 
-      // Master BGM bus for cheerful Guitar + Piano train music
+      // Master BGM bus with compressor for clear, loud playback on mobile speakers
+      this.bgmComp = this.ctx.createDynamicsCompressor();
+      this.bgmComp.threshold.value = -14;
+      this.bgmComp.ratio.value = 4;
       this.bgmGain = this.ctx.createGain();
-      this.bgmGain.gain.value = 0.24;
-      this.bgmGain.connect(this.ctx.destination);
+      this.bgmGain.gain.value = 0.72;
+      this.bgmGain.connect(this.bgmComp).connect(this.ctx.destination);
       this.startBGM();
     },
     startBGM() {
@@ -605,7 +628,7 @@
       const tick = () => {
         if (!this.ctx || !this.bgmGain) return;
         const active = this.bgmEnabled && !this.muted;
-        const targetVol = active ? 0.24 : 0.0;
+        const targetVol = active ? 0.72 : 0.0;
         this.bgmGain.gain.setTargetAtTime(targetVol, this.ctx.currentTime, 0.06);
         if (!active) return;
 
@@ -641,6 +664,7 @@
 
         this.bgmStep = (this.bgmStep + 1) % 64;
       };
+      tick();
       this.bgmTimer = setInterval(tick, 254); // ~118 BPM eighth-notes
     },
     playGuitarPluck(freq, startTime, dur, vol) {
@@ -701,8 +725,8 @@
     duckBGM(sec = 3.8) {
       if (!this.ctx || !this.bgmGain || !this.bgmEnabled || this.muted) return;
       const now = this.ctx.currentTime;
-      this.bgmGain.gain.setTargetAtTime(0.06, now, 0.12);
-      this.bgmGain.gain.setTargetAtTime(0.24, now + sec, 0.35);
+      this.bgmGain.gain.setTargetAtTime(0.18, now, 0.12);
+      this.bgmGain.gain.setTargetAtTime(0.72, now + sec, 0.35);
     },
     update(kmh, notch, sMeters) {
       if (!this.ctx || this.muted) {
@@ -1353,19 +1377,54 @@
   bgmBtn.addEventListener("pointerdown", () => {
     AudioEngine.init();
     AudioEngine.bgmEnabled = !AudioEngine.bgmEnabled;
-    bgmBtn.textContent = AudioEngine.bgmEnabled ? "🎵 音樂開" : "🎵 音樂關";
+    bgmBtn.textContent = AudioEngine.bgmEnabled ? "🎵 音樂" : "🎵 關閉";
   });
   muteBtn.addEventListener("pointerdown", () => {
     AudioEngine.init();
     AudioEngine.muted = !AudioEngine.muted;
-    muteBtn.textContent = AudioEngine.muted ? "🔇 靜音中" : "🔊 音效開";
+    muteBtn.textContent = AudioEngine.muted ? "🔇 靜音" : "🔊 音效";
   });
   document.getElementById("btn-restart").addEventListener("pointerdown", () => {
     AudioEngine.init();
     resetGame();
   });
+  const fsBtn = document.getElementById("btn-fs");
+  function toggleFullscreen(forceEnter = false) {
+    const docEl = document.documentElement;
+    const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+    if (!isFs) {
+      const req = docEl.requestFullscreen || docEl.webkitRequestFullscreen;
+      if (req) {
+        try {
+          const p = req.call(docEl, { navigationUI: "hide" });
+          if (p && p.then) {
+            p.then(() => {
+              if (screen.orientation && screen.orientation.lock) {
+                screen.orientation.lock("landscape").catch(() => {});
+              }
+            }).catch(() => {});
+          }
+        } catch (_) {}
+      }
+    } else if (!forceEnter) {
+      const ex = document.exitFullscreen || document.webkitExitFullscreen;
+      if (ex) { try { ex.call(document); } catch (_) {} }
+    }
+  }
+  fsBtn.addEventListener("click", () => {
+    AudioEngine.unlock();
+    toggleFullscreen(false);
+  });
+  document.addEventListener("fullscreenchange", () => {
+    const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+    fsBtn.textContent = isFs ? "⛶ 退出" : "⛶ 全螢幕";
+  });
+  // Ensure mobile audio unlocks on any first touch
+  window.addEventListener("touchstart", () => AudioEngine.unlock(), { passive: true });
+
   document.getElementById("btn-start").addEventListener("click", () => {
-    AudioEngine.init();
+    AudioEngine.unlock();
+    toggleFullscreen(true);
     state.started = true;
     document.getElementById("start-modal").classList.add("hidden");
     resetGame();
